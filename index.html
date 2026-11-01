@@ -1,0 +1,694 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>水深・離岸距離マップ</title>
+<meta name="description" content="日本近海の水深と陸からの距離。現在地表示と圏外での閲覧に対応。">
+<meta name="theme-color" content="#1d2a36">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="水深マップ">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icon-180.png">
+<link rel="icon" href="icon-192.png">
+<style>html { box-sizing: border-box; padding-bottom: env(safe-area-inset-bottom, 0px); } body { margin: 0; } [hidden] { display: none !important; } img { max-width: 100%; }</style>
+</head>
+<body>
+<style>
+/* レイアウト：全画面の地図＋海図の余白欄のような操作パネル（PC=左、スマホ=下） */
+:root {
+  --paper: #f6f4ee;        /* パネル地：海図の紙 */
+  --ink: #1d2a36;          /* 本文 */
+  --muted: #5f6b76;
+  --rule: #d9d4c7;
+  --accent: #b0206a;       /* 海図の情報線に使うマゼンタ */
+  --accent-soft: #f6e3ec;
+  --land: #e9dfc4;         /* 陸：海図のバフ色 */
+  --coast: #7b6f55;
+  --iso-line: rgba(18, 44, 78, .32);
+  --dist-line: #b0206a;
+  --dim: #c9cccd;
+  --void: #d8dde0;
+  --label: #3b3326;
+  --halo: rgba(246, 244, 238, .92);
+  --chip: #ffffff;
+  --map-dark: 0;
+  --font: "BIZ UDPGothic", "Hiragino Sans", "Yu Gothic", "Meiryo", sans-serif;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --paper: #141b22; --ink: #e4e8ec; --muted: #9aa6b1; --rule: #2b3640;
+    --accent: #ff6fae; --accent-soft: #3a1f2e;
+    --land: #2c2a25; --coast: #a69977; --iso-line: rgba(220, 235, 255, .30);
+    --dist-line: #ff6fae; --dim: #262b31; --void: #0f1418;
+    --label: #e8dfca; --halo: rgba(20, 27, 34, .9); --chip: #1c252e; --map-dark: 1;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --paper: #141b22; --ink: #e4e8ec; --muted: #9aa6b1; --rule: #2b3640;
+  --accent: #ff6fae; --accent-soft: #3a1f2e;
+  --land: #2c2a25; --coast: #a69977; --iso-line: rgba(220, 235, 255, .30);
+  --dist-line: #ff6fae; --dim: #262b31; --void: #0f1418;
+  --label: #e8dfca; --halo: rgba(20, 27, 34, .9); --chip: #1c252e; --map-dark: 1;
+  color-scheme: dark;
+}
+html, body { height: 100%; }
+body { background: var(--paper); color: var(--ink); font-family: var(--font); font-size: 14px; overflow: hidden; }
+#app { display: grid; grid-template-columns: 344px 1fr; height: 100%; }
+#panel { overflow-y: auto; border-right: 1px solid var(--rule); padding-block: 18px 24px; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: 16px; display: flex; flex-direction: column; gap: 18px; min-width: 0; }
+#map { position: relative; background: var(--void); min-width: 0; }
+@media (max-width: 760px) {
+  #app { grid-template-columns: 1fr; grid-template-rows: minmax(0, 1fr) auto; }
+  #panel { order: 2; max-height: 27vh; transition: max-height .2s ease; border-right: 0; border-top: 1px solid var(--rule); padding-block: 12px 16px; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+  #map { order: 1; }
+  .hide-sm { display: none; }
+}
+h1 { font-size: 19px; line-height: 1.3; margin: 2px 0 0; text-wrap: balance; letter-spacing: .02em; }
+.eyebrow { font-size: 11px; letter-spacing: .12em; color: var(--muted); }
+h2 { font-size: 12px; letter-spacing: .1em; color: var(--muted); margin: 0 0 8px; font-weight: 700; }
+section { display: flex; flex-direction: column; }
+p { margin: 0; line-height: 1.7; }
+.small { font-size: 12px; color: var(--muted); line-height: 1.65; }
+
+/* 地点情報 */
+.readout { border: 1px solid var(--rule); border-radius: 6px; padding: 12px; background: var(--chip); display: grid; grid-template-columns: auto 1fr; gap: 6px 14px; align-items: baseline; font-variant-numeric: tabular-nums; }
+.readout dt { font-size: 12px; color: var(--muted); }
+.readout dd { margin: 0; font-size: 15px; }
+.readout dd b { font-size: 18px; }
+.readout .sub { font-size: 12px; color: var(--muted); }
+.readout .where { grid-column: 1 / -1; font-size: 11px; color: var(--muted); border-top: 1px dashed var(--rule); padding-top: 6px; }
+
+/* 操作部品 */
+.seg { display: grid; grid-template-columns: 1fr 1fr; border: 1px solid var(--rule); border-radius: 6px; overflow: hidden; }
+.seg button { font: inherit; border: 0; padding: 8px 6px; background: var(--chip); color: var(--ink); cursor: pointer; }
+.seg button + button { border-left: 1px solid var(--rule); }
+.seg button[aria-pressed="true"] { background: var(--ink); color: var(--paper); }
+.row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.check { display: flex; align-items: center; gap: 8px; cursor: pointer; padding: 3px 0; }
+.check input { accent-color: var(--accent); width: 16px; height: 16px; margin: 0; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.chip { font: inherit; font-size: 12px; font-variant-numeric: tabular-nums; border: 1px solid var(--rule); background: var(--chip); color: var(--muted); border-radius: 999px; padding: 3px 10px; cursor: pointer; }
+.chip[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+.unit { font-size: 12px; color: var(--muted); margin-left: auto; display: flex; gap: 4px; }
+.unit button { font: inherit; font-size: 12px; border: 1px solid var(--rule); background: var(--chip); color: var(--muted); padding: 2px 8px; border-radius: 4px; cursor: pointer; }
+.unit button[aria-pressed="true"] { color: var(--ink); border-color: var(--ink); }
+.range { display: grid; grid-template-columns: 4.5em 1fr auto 1fr auto; gap: 6px; align-items: center; margin-top: 8px; font-size: 13px; }
+.range input { font: inherit; font-variant-numeric: tabular-nums; width: 100%; min-width: 0; padding: 5px 6px; border: 1px solid var(--rule); border-radius: 4px; background: var(--chip); color: var(--ink); text-align: right; }
+.places { display: flex; flex-wrap: wrap; gap: 6px; }
+.places button { font: inherit; font-size: 13px; border: 1px solid var(--rule); background: var(--chip); color: var(--ink); padding: 5px 10px; border-radius: 4px; cursor: pointer; }
+.places button:hover { border-color: var(--ink); }
+button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.legend canvas { width: 100%; height: 14px; display: block; border-radius: 2px; }
+.ticks { position: relative; height: 16px; font-size: 10px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.ticks span { position: absolute; transform: translateX(-50%); white-space: nowrap; }
+.ticks span:first-child { transform: none; }
+.ticks span:last-child { transform: translateX(-100%); }
+.key { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12px; color: var(--muted); margin-top: 4px; }
+.key i { display: inline-block; width: 18px; height: 0; border-top: 2px solid var(--dist-line); vertical-align: middle; margin-right: 5px; }
+.key i.iso { border-top: 1px solid var(--iso-line); border-top-width: 2px; }
+.key i.match { border-top: 3px solid #e89600; }
+details summary { cursor: pointer; font-size: 12px; color: var(--muted); letter-spacing: .1em; font-weight: 700; }
+details[open] summary { margin-bottom: 8px; }
+
+/* 地図上 */
+#tip { position: absolute; z-index: 1100; pointer-events: none; background: var(--paper); color: var(--ink); border: 1px solid var(--rule); border-radius: 4px; padding: 6px 8px; font-size: 12px; line-height: 1.5; font-variant-numeric: tabular-nums; box-shadow: 0 2px 8px rgba(0,0,0,.15); white-space: nowrap; }
+#loading { position: absolute; z-index: 1100; left: 50%; top: 12px; transform: translateX(-50%); background: var(--paper); color: var(--muted); border: 1px solid var(--rule); border-radius: 999px; padding: 4px 12px; font-size: 12px; }
+.lbl span { position: absolute; transform: translate(-50%, -50%); white-space: nowrap; font-size: 11px; color: var(--label); text-shadow: 0 0 3px var(--halo), 0 0 3px var(--halo), 0 0 2px var(--halo); pointer-events: none; font-family: var(--font); }
+.lbl.pref span { font-size: 13px; font-weight: 700; letter-spacing: .08em; }
+
+/* Leaflet の必要最小限のスタイル */
+.leaflet-pane, .leaflet-tile, .leaflet-marker-icon, .leaflet-tile-container, .leaflet-pane > svg, .leaflet-pane > canvas, .leaflet-zoom-box, .leaflet-layer { position: absolute; left: 0; top: 0; }
+.leaflet-container { overflow: hidden; height: 100%; font-family: var(--font); -webkit-tap-highlight-color: transparent; outline-offset: 1px; }
+.leaflet-container img, .leaflet-container svg, .leaflet-container canvas { max-width: none !important; max-height: none !important; }
+.leaflet-tile, .leaflet-marker-icon { user-select: none; -webkit-user-drag: none; }
+.leaflet-tile { visibility: hidden; }
+.leaflet-tile-loaded { visibility: inherit; }
+.leaflet-pane { z-index: 400; }
+.leaflet-tile-pane { z-index: 200; }
+.leaflet-overlay-pane { z-index: 400; }
+.leaflet-marker-pane { z-index: 600; }
+.leaflet-tooltip-pane { z-index: 650; }
+.leaflet-popup-pane { z-index: 700; }
+.leaflet-map-pane canvas { z-index: 100; }
+.leaflet-map-pane svg { z-index: 200; }
+.leaflet-zoom-box { width: 0; height: 0; box-sizing: border-box; z-index: 800; border: 2px dotted var(--accent); }
+.leaflet-control { position: relative; z-index: 800; pointer-events: auto; float: left; clear: both; }
+.leaflet-top, .leaflet-bottom { position: absolute; z-index: 1000; pointer-events: none; }
+.leaflet-top { top: 0; } .leaflet-right { right: 0; } .leaflet-bottom { bottom: 0; } .leaflet-left { left: 0; }
+.leaflet-right .leaflet-control { float: right; }
+.leaflet-top .leaflet-control { margin-top: 10px; } .leaflet-bottom .leaflet-control { margin-bottom: 10px; }
+.leaflet-left .leaflet-control { margin-left: 10px; } .leaflet-right .leaflet-control { margin-right: 10px; }
+.leaflet-zoom-animated { transform-origin: 0 0; }
+.leaflet-zoom-anim .leaflet-zoom-animated { transition: transform .25s cubic-bezier(0, 0, .25, 1); }
+.leaflet-zoom-anim .leaflet-tile, .leaflet-pan-anim .leaflet-tile { transition: none; }
+.leaflet-zoom-anim .leaflet-zoom-hide { visibility: hidden; }
+.leaflet-interactive { cursor: pointer; }
+.leaflet-grab { cursor: grab; }
+.leaflet-dragging .leaflet-grab, .leaflet-dragging .leaflet-grab .leaflet-interactive { cursor: grabbing; }
+.leaflet-container.leaflet-touch-zoom { touch-action: pan-x pan-y; }
+.leaflet-container.leaflet-touch-drag { touch-action: pinch-zoom; }
+.leaflet-container.leaflet-touch-drag.leaflet-touch-zoom { touch-action: none; }
+.leaflet-crosshair, .leaflet-crosshair .leaflet-interactive { cursor: crosshair; }
+.leaflet-bar { border: 1px solid var(--rule); border-radius: 4px; overflow: hidden; }
+.leaflet-bar a { display: block; width: 32px; height: 32px; line-height: 30px; text-align: center; text-decoration: none; background: var(--paper); color: var(--ink); font-size: 18px; }
+.leaflet-bar a + a { border-top: 1px solid var(--rule); }
+.leaflet-bar a.leaflet-disabled { color: var(--muted); opacity: .5; cursor: default; }
+.leaflet-control-scale-line { border: 2px solid var(--ink); border-top: 0; line-height: 1.2; padding: 1px 5px; font-size: 11px; white-space: nowrap; box-sizing: border-box; background: var(--halo); color: var(--ink); }
+.leaflet-control-attribution { background: var(--halo); color: var(--muted); padding: 1px 6px; font-size: 10px; margin: 0 !important; }
+.leaflet-control-attribution a { color: var(--muted); }
+
+/* スマホ：地図を広く、パネルは低く・文字は小さく。ボタンで広げられる */
+.head { display: flex; align-items: flex-end; justify-content: space-between; gap: 8px; }
+.sheet-btn { display: none; font: inherit; font-size: 12px; border: 1px solid var(--rule); background: var(--chip); color: var(--ink); border-radius: 999px; padding: 4px 10px; cursor: pointer; white-space: nowrap; }
+@media (max-width: 760px) {
+  #app.open #panel { max-height: 68vh; }
+  .sheet-btn { display: inline-block; }
+  #panel { gap: 12px; font-size: 13px; }
+  h1 { font-size: 15px; margin: 0; }
+  .eyebrow { font-size: 10px; letter-spacing: .08em; }
+  h2 { font-size: 11px; margin-bottom: 6px; }
+  .readout { padding: 8px 10px; gap: 3px 12px; }
+  .readout dt { font-size: 11px; }
+  .readout dd { font-size: 13px; }
+  .readout dd b { font-size: 15px; }
+  .readout .sub { font-size: 11px; }
+  .readout .where { font-size: 10px; padding-top: 4px; }
+}
+</style>
+
+<div id="app">
+  <aside id="panel">
+    <header class="head">
+      <div>
+        <div class="eyebrow">日本近海 ・ 約460m格子</div>
+        <h1>水深と陸からの距離</h1>
+      </div>
+      <button id="sheet" class="sheet-btn" aria-expanded="false">設定を広げる</button>
+    </header>
+
+    <section aria-labelledby="h-point">
+      <h2 id="h-point">地点情報 <span class="small" style="font-weight:400;letter-spacing:0" id="pt-hint">地図を押すと切替</span></h2>
+      <dl class="readout" id="readout">
+        <dt>水深</dt><dd id="r-depth">—</dd>
+        <dt>陸からの距離</dt><dd id="r-dist">—</dd>
+        <dt>最寄りの陸</dt><dd id="r-near" style="font-size:14px">—</dd>
+        <div class="where" id="r-where">—</div>
+      </dl>
+    </section>
+
+    <section aria-labelledby="h-color">
+      <h2 id="h-color">色分け</h2>
+      <div class="seg" role="group" aria-label="色分けの対象">
+        <button id="mode-depth" aria-pressed="true">水深</button>
+        <button id="mode-dist" aria-pressed="false">陸からの距離</button>
+      </div>
+      <div class="legend" style="margin-top:10px">
+        <canvas id="legend" width="600" height="28"></canvas>
+        <div class="ticks" id="ticks"></div>
+      </div>
+    </section>
+
+    <section aria-labelledby="h-lines">
+      <div class="row"><h2 id="h-lines" style="margin:0">線</h2>
+        <div class="unit" role="group" aria-label="距離の単位"><button id="u-km" aria-pressed="true">km</button><button id="u-nm" aria-pressed="false">海里</button></div>
+      </div>
+      <label class="check"><input type="checkbox" id="show-dist" checked> 陸からの距離の線</label>
+      <div class="chips" id="dist-chips"></div>
+      <label class="check" style="margin-top:8px"><input type="checkbox" id="show-iso" checked> 等深線（10・20・50・100・200・500・1000m…）</label>
+      <div class="key"><span><i></i>距離の線</span><span><i class="iso"></i>等深線</span></div>
+    </section>
+
+    <section aria-labelledby="h-filter">
+      <h2 id="h-filter">条件で海域を探す</h2>
+      <label class="check"><input type="checkbox" id="flt-on"> 条件に合う海域だけを色付きで残す</label>
+      <div class="range"><span>水深</span><input id="d0" type="number" min="0" step="1" value="10" inputmode="numeric" aria-label="水深の下限 m"><span>〜</span><input id="d1" type="number" min="0" step="1" value="50" inputmode="numeric" aria-label="水深の上限 m"><span>m</span></div>
+      <div class="range"><span>陸から</span><input id="t0" type="number" min="0" step="0.5" value="0" inputmode="decimal" aria-label="陸からの距離の下限"><span>〜</span><input id="t1" type="number" min="0" step="0.5" value="10" inputmode="decimal" aria-label="陸からの距離の上限"><span id="t-unit">km</span></div>
+      <div class="key"><span><i class="match"></i>条件に合う海域の縁</span></div>
+    </section>
+
+    <section aria-labelledby="h-go">
+      <h2 id="h-go">移動</h2>
+      <div class="places" id="places"></div>
+    </section>
+
+    <details class="hide-sm" open>
+      <summary>データについて</summary>
+      <p class="small">水深は米国海洋大気庁（NOAA NCEI）の全球地形データ ETOPO 2022（15秒＝約460m格子）。陸の地図は国土地理院の地理院タイル（淡色地図）を加工して表示しています。海と陸の判定はETOPOの標高と国土数値情報の行政区域を重ねて行い、外洋とつながる水域だけを海としています。陸からの距離は、各格子から最寄りの陸までの直線距離です。</p>
+      <p class="small" style="margin-top:6px">格子の大きさの分、岸近くの距離はおおむね±0.3kmずれ、数百m以下の岩礁は抜けることがあります。距離は海岸線からの値で、領海の基線（直線基線など）からの距離とは一致しません。航海や工事の根拠には海上保安庁の海図などを使ってください。</p>
+    </details>
+  </aside>
+  <div id="map" aria-label="水深と陸からの距離の地図"><div id="loading">データを読み込み中…</div></div>
+</div>
+
+<script src="leaflet.js"></script>
+<script>
+(async function () {
+  'use strict';
+  const DPR = Math.min(2, window.devicePixelRatio || 1);
+  const meta = await fetch('data/meta.json').then(r => r.json());
+  const W = meta.west, N = meta.north, E = meta.east, S = meta.south, RES = meta.res;
+  const CN = meta.chunkN, NX = Math.round((E - W) / RES), NY = Math.round((N - S) / RES);
+  const CI = Math.round((E - W) / meta.chunkDeg), CJ = Math.round((N - S) / meta.chunkDeg);
+  const K = meta.ovK, OW = meta.ovW, OH = meta.ovH;
+
+  // ---- データ（PNGに詰めた3段：水深/距離/最寄り自治体） ----
+  async function loadPlanes(url, w, h) {
+    const blob = await fetch(url).then(r => { if (!r.ok) throw new Error(url); return r.blob(); });
+    const bmp = await createImageBitmap(blob, { premultiplyAlpha: 'none', colorSpaceConversion: 'none' });
+    const cv = document.createElement('canvas'); cv.width = bmp.width; cv.height = bmp.height;
+    const cx = cv.getContext('2d', { willReadFrequently: true });
+    cx.drawImage(bmp, 0, 0);
+    const px = cx.getImageData(0, 0, bmp.width, bmp.height).data;
+    const n = w * h, dep = new Uint16Array(n), dis = new Uint16Array(n), mun = new Uint16Array(n), oc = new Uint8Array(n);
+    for (let i = 0; i < n; i++) {
+      const a = i * 4, b = (i + n) * 4, c = (i + 2 * n) * 4;
+      dep[i] = px[a] << 8 | px[a + 1]; oc[i] = px[a + 2] > 127 ? 1 : 0;
+      dis[i] = px[b] << 8 | px[b + 1]; mun[i] = px[c] << 8 | px[c + 1];
+    }
+    return { dep, dis, mun, oc, w, h };
+  }
+  const HAS = new Uint8Array(CI * CJ);
+  for (const [i, j] of meta.chunks) HAS[j * CI + i] = 1;
+  const CH = new Array(CI * CJ).fill(null);
+  const CHP = new Array(CI * CJ).fill(null);
+  const pad = v => String(v).padStart(2, '0');
+  function ensureChunk(k) {
+    if (!HAS[k]) return Promise.resolve();
+    if (!CHP[k]) CHP[k] = loadPlanes(`data/c${pad(k % CI)}_${pad((k / CI) | 0)}.png`, CN, CN).then(d => { CH[k] = d; });
+    return CHP[k];
+  }
+  const [OV, MUNI, LABELS] = await Promise.all([
+    loadPlanes('data/overview.png', OW, OH),
+    fetch('data/muni.json').then(r => r.json()),
+    fetch('data/labels.json').then(r => r.json())
+  ]);
+  document.getElementById('loading').hidden = true;
+
+  // ---- 格子の参照（gO: 1=海, 0=陸, -1=範囲外） ----
+  let gO = 0, gD = 0, gS = 0, gM = 0;
+  const FINE = {
+    toX: lon => (lon - W) / RES - 0.5,
+    toY: lat => (N - lat) / RES - 0.5,
+    get(x, y) {
+      if (x < 0 || y < 0 || x >= NX || y >= NY) { gO = -1; return; }
+      const k = ((y / CN) | 0) * CI + ((x / CN) | 0), c = CH[k];
+      if (!c) { gO = 0; gD = 0; gS = 0; gM = 0; return; }
+      const i = (y % CN) * CN + (x % CN);
+      gO = c.oc[i]; gD = c.dep[i]; gS = c.dis[i]; gM = c.mun[i];
+    }
+  };
+  const COARSE = {
+    toX: lon => (lon - W) / (RES * K) - (K / 2 + 0.5) / K,
+    toY: lat => (N - lat) / (RES * K) - (K / 2 + 0.5) / K,
+    get(x, y) {
+      if (x < 0 || y < 0 || x >= OW || y >= OH) { gO = -1; return; }
+      const i = y * OW + x;
+      gO = OV.oc[i]; gD = OV.dep[i]; gS = OV.dis[i]; gM = OV.mun[i];
+    }
+  };
+  // 双線形補間（海のセルだけで平均し、陸の0を混ぜない）
+  const smp = { m: 0, nd: 0, d: 0, s: 0 };
+  function sample(Lv, fx, fy) {
+    const x0 = Math.floor(fx), y0 = Math.floor(fy), tx = fx - x0, ty = fy - y0;
+    let m = 0, nd = 0, sd = 0, ss = 0;
+    for (let c = 0; c < 4; c++) {
+      const x = x0 + (c & 1), y = y0 + (c >> 1);
+      const w = (c & 1 ? tx : 1 - tx) * (c >> 1 ? ty : 1 - ty);
+      Lv.get(x, y);
+      if (gO < 0) nd += w;
+      else if (gO) { m += w; sd += w * gD; ss += w * gS; }
+    }
+    smp.nd = nd; smp.m = m;
+    smp.d = m > 0 ? sd / m : 0; smp.s = m > 0 ? ss / m / 100 : 0;
+    return smp;
+  }
+
+  // ---- 色 ----
+  function hex(c) { c = c.trim(); if (c.startsWith('#')) { const v = parseInt(c.slice(1), 16); return [v >> 16 & 255, v >> 8 & 255, v & 255, 1]; } const m = c.match(/[\d.]+/g).map(Number); return [m[0], m[1], m[2], m.length > 3 ? m[3] : 1]; }
+  function buildLUT(stops, max, step, f) {
+    const n = Math.round(max / step) + 1, lut = new Uint8Array(n * 3);
+    const pos = stops.map(s => f(s[0])), cols = stops.map(s => hex(s[1]));
+    for (let i = 0; i < n; i++) {
+      const t = f(i * step); let k = 0;
+      while (k < pos.length - 2 && t > pos[k + 1]) k++;
+      const u = Math.max(0, Math.min(1, (t - pos[k]) / (pos[k + 1] - pos[k])));
+      for (let ch = 0; ch < 3; ch++) lut[i * 3 + ch] = Math.round(cols[k][ch] + (cols[k + 1][ch] - cols[k][ch]) * u);
+    }
+    return lut;
+  }
+  const fD = v => Math.log(1 + v / 4), fT = v => Math.log(1 + v / 0.8);
+  const DEPTH_STOPS = [[0, '#e6f7f2'], [5, '#cdeeea'], [10, '#b0e2e4'], [20, '#8dcfdc'], [50, '#62b3d2'], [100, '#4697c5'], [200, '#337ab5'], [500, '#295fa1'], [1000, '#244a8c'], [2000, '#1f3875'], [4000, '#1a295c'], [6000, '#141e45'], [10000, '#0b1230']];
+  const DIST_STOPS = [[0, '#fff3cf'], [1, '#ffe2a1'], [3, '#ffc777'], [5, '#fbab5e'], [10, '#ef8955'], [20, '#d96858'], [50, '#b24f6c'], [100, '#82407c'], [200, '#55327a'], [400, '#30265e'], [900, '#1b173b']];
+  const DLUT = buildLUT(DEPTH_STOPS, 10000, 1, fD);
+  const TLUT = buildLUT(DIST_STOPS, 900, 0.1, fT);
+
+  // ---- 状態 ----
+  const KM_LEVELS = [1, 2, 3, 5, 10, 20, 30, 50, 100, 200];
+  const NM_LEVELS = [1, 3, 6, 12, 24, 50, 100, 200];
+  const st = {
+    mode: 'depth', unit: 'km', showDist: true, showIso: true, filter: false,
+    on: { km: new Set([1, 3, 5, 10, 20, 50, 100]), nm: new Set([3, 12, 24, 100]) },
+    major: { km: new Set([10, 50, 100]), nm: new Set([12, 24]) },
+    d0: 10, d1: 50, t0: 0, t1: 10
+  };
+  const ISO = [10, 20, 50, 100, 200, 500, 1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000, 9000];
+  const ISO_MAJOR = new Set([50, 200, 1000]);
+
+  let C = {};
+  function readColors() {
+    const cs = getComputedStyle(document.documentElement), g = n => hex(cs.getPropertyValue(n));
+    C = { dark: cs.getPropertyValue('--map-dark').trim() === '1', land: g('--land'), coast: g('--coast'), iso: g('--iso-line'), dist: g('--dist-line'), dim: g('--dim'), match: [232, 150, 0, 1] };
+  }
+  readColors();
+
+  // ---- タイル描画 ----
+  const y2lat = yn => 180 / Math.PI * Math.atan(Math.sinh(Math.PI * (1 - 2 * yn)));
+  function band(levels, v) { let b = 0; while (b < levels.length && v >= levels[b]) b++; return b; }
+
+  function drawTile(tile, coords, Lv, G) {
+    const Sz = 256 * DPR, n = Sz * Sz, scale = 256 * Math.pow(2, coords.z);
+    const ctx = tile.getContext('2d'), img = ctx.createImageData(Sz, Sz), px = img.data;
+    const FX = new Float64Array(Sz), FY = new Float64Array(Sz), LONS = new Float64Array(Sz), LATS = new Float64Array(Sz);
+    for (let i = 0; i < Sz; i++) {
+      LONS[i] = (coords.x * 256 + (i + 0.5) / DPR) / scale * 360 - 180; FX[i] = Lv.toX(LONS[i]);
+      LATS[i] = y2lat((coords.y * 256 + (i + 0.5) / DPR) / scale); FY[i] = Lv.toY(LATS[i]);
+    }
+    const M = new Float32Array(n), D = new Float32Array(n), T = new Float32Array(n), V = new Uint8Array(n);
+    for (let y = 0; y < Sz; y++) {
+      const out = LATS[y] > N || LATS[y] < S;
+      for (let x = 0; x < Sz; x++) {
+        const p = y * Sz + x;
+        if (out || LONS[x] < W || LONS[x] > E) { V[p] = 0; continue; }
+        const r = sample(Lv, FX[x], FY[y]);
+        V[p] = r.nd > 0.5 ? 0 : 1; M[p] = r.m; D[p] = r.d; T[p] = r.s;
+      }
+    }
+    // 帯番号（線の検出用）。-1=陸
+    const unit = st.unit, k = unit === 'nm' ? 1.852 : 1;
+    const pxKm = 40075 * Math.cos(LATS[Sz >> 1] * Math.PI / 180) / scale;
+    const dl = (unit === 'nm' ? NM_LEVELS : KM_LEVELS).filter(v => st.on[unit].has(v) && v * k >= pxKm * 5).map(v => v * k);
+    const dlMajor = dl.map(v => st.major[unit].has(Math.round(v / k)));
+    const BT = new Int16Array(n), BD = new Int16Array(n), MT = new Uint8Array(n);
+    const lo = st.d0, hi = st.d1, t0 = st.t0 * k, t1 = st.t1 * k;
+    for (let p = 0; p < n; p++) {
+      if (!V[p] || M[p] < 0.5) { BT[p] = -1; BD[p] = -1; continue; }
+      BT[p] = band(dl, T[p]); BD[p] = band(ISO, D[p]);
+      MT[p] = D[p] >= lo && D[p] <= hi && T[p] >= t0 && T[p] <= t1 ? 1 : 0;
+    }
+    const lineT = new Float32Array(n), lineD = new Float32Array(n), lineM = new Uint8Array(n);
+    const R1 = Math.max(1, Math.round(DPR)), R2 = R1 * 2;
+    function edges(B, out, majorOf, levels) {
+      for (let y = 0; y < Sz; y++) for (let x = 0; x < Sz; x++) {
+        const p = y * Sz + x, b = B[p]; if (b < 0) continue;
+        for (let r = 1; r <= R2; r++) {
+          const q1 = x + r < Sz ? p + r : -1, q2 = y + r < Sz ? p + r * Sz : -1;
+          for (const q of [q1, q2]) {
+            if (q < 0) continue; const c = B[q]; if (c < 0 || c === b) continue;
+            const lv = Math.min(b, c), major = majorOf ? majorOf(lv) : false;
+            if (r > (major ? R2 : R1)) continue;
+            const a = major ? 1 : 0.8;
+            if (a > out[p]) out[p] = a;
+          }
+        }
+      }
+    }
+    if (st.showDist && dl.length) edges(BT, lineT, lv => dlMajor[lv]);
+    if (st.showIso) edges(BD, lineD, lv => ISO_MAJOR.has(ISO[lv]));
+    if (st.filter) for (let y = 0; y < Sz; y++) for (let x = 0; x < Sz; x++) {
+      const p = y * Sz + x; if (BT[p] < 0 || !MT[p]) continue;
+      outer: for (let r = 1; r <= R1 + 1; r++) {
+        for (const q of [x >= r ? p - r : -1, x < Sz - r ? p + r : -1, y >= r ? p - r * Sz : -1, y < Sz - r ? p + r * Sz : -1]) {
+          if (q >= 0 && BT[q] >= 0 && !MT[q]) { lineM[p] = 1; break outer; }
+        }
+      }
+    }
+    const land = C.land, coast = C.coast, iso = C.iso, dc = C.dist, dim = C.dim, mt = C.match, dark = C.dark;
+    const lineOnDist = st.mode === 'dist';
+    for (let p = 0; p < n; p++) {
+      const o = p * 4;
+      if (!V[p]) { px[o + 3] = 0; continue; }
+      let r, g, b;
+      const m = M[p];
+      // 地理院タイルがあれば陸はそのまま使い、海の色の画素だけ水深データで塗る
+      const gOK = G && G[o + 3] > 127;
+      if (gOK) {
+        const gr = G[o], gg = G[o + 1], gb = G[o + 2];
+        const gsea = Math.abs(gr - 190) + Math.abs(gg - 210) + Math.abs(gb - 255) < 36;
+        if (!gsea || m < 0.02) {
+          if (dark) { const l = 255 - Math.max(gr, gg, gb) - Math.min(gr, gg, gb); px[o] = 24 + (l + gr) * 0.78; px[o + 1] = 24 + (l + gg) * 0.78; px[o + 2] = 24 + (l + gb) * 0.78; }
+          else { px[o] = gr; px[o + 1] = gg; px[o + 2] = gb; }
+          px[o + 3] = 255; continue;
+        }
+      } else if (m < 0.5) {
+        r = land[0]; g = land[1]; b = land[2];
+        const cw = Math.max(0, 1 - Math.abs(m - 0.5) / 0.09);
+        r += (coast[0] - r) * cw * 0.85; g += (coast[1] - g) * cw * 0.85; b += (coast[2] - b) * cw * 0.85;
+        px[o] = r; px[o + 1] = g; px[o + 2] = b; px[o + 3] = 255; continue;
+      }
+      let li;
+      if (st.mode === 'depth') { li = Math.min(10000, D[p] | 0) * 3; r = DLUT[li]; g = DLUT[li + 1]; b = DLUT[li + 2]; }
+      else { li = Math.min(9000, (T[p] * 10) | 0) * 3; r = TLUT[li]; g = TLUT[li + 1]; b = TLUT[li + 2]; }
+      if (st.filter && BT[p] >= 0 && !MT[p]) { r = r * 0.15 + dim[0] * 0.85; g = g * 0.15 + dim[1] * 0.85; b = b * 0.15 + dim[2] * 0.85; }
+      if (lineD[p]) { const a = iso[3] * lineD[p] * 1.6; r += (iso[0] - r) * a; g += (iso[1] - g) * a; b += (iso[2] - b) * a; }
+      if (lineT[p]) { const col = lineOnDist ? [30, 24, 40] : dc, a = lineT[p] * (lineOnDist ? 0.55 : 0.9); r += (col[0] - r) * a; g += (col[1] - g) * a; b += (col[2] - b) * a; }
+      if (lineM[p]) { r = mt[0]; g = mt[1]; b = mt[2]; }
+      if (!gOK) { const cw = Math.max(0, 1 - Math.abs(m - 0.5) / 0.09); r += (coast[0] - r) * cw * 0.85; g += (coast[1] - g) * cw * 0.85; b += (coast[2] - b) * cw * 0.85; }
+      px[o] = r; px[o + 1] = g; px[o + 2] = b; px[o + 3] = 255;
+    }
+    ctx.putImageData(img, 0, 0);
+  }
+
+  function chunksForTile(coords) {
+    const scale = 256 * Math.pow(2, coords.z);
+    const lon0 = coords.x * 256 / scale * 360 - 180, lon1 = (coords.x + 1) * 256 / scale * 360 - 180;
+    const lat0 = y2lat(coords.y * 256 / scale), lat1 = y2lat((coords.y + 1) * 256 / scale);
+    const x0 = Math.max(0, Math.floor(FINE.toX(lon0)) - 1), x1 = Math.min(NX - 1, Math.ceil(FINE.toX(lon1)) + 1);
+    const y0 = Math.max(0, Math.floor(FINE.toY(lat0)) - 1), y1 = Math.min(NY - 1, Math.ceil(FINE.toY(lat1)) + 1);
+    const ks = [];
+    if (x0 > x1 || y0 > y1) return ks;
+    for (let j = (y0 / CN) | 0; j <= ((y1 / CN) | 0); j++) for (let i = (x0 / CN) | 0; i <= ((x1 / CN) | 0); i++) ks.push(j * CI + i);
+    return ks;
+  }
+
+  const FINE_FROM = 8;
+
+  // ---- 地理院タイル（淡色地図）：z別に8×8枚を1枚のWebPに並べたものから切り出す ----
+  const GZ = 11;
+  let GIDX = new Set();
+  try { GIDX = new Set(await fetch('gsi/index.json').then(r => r.json())); } catch (e) { console.warn('gsi index', e); }
+  const GA = new Map();
+  function gsiAtlas(name) {
+    if (GA.has(name)) { const p = GA.get(name); GA.delete(name); GA.set(name, p); return p; }
+    const p = !GIDX.has(name) ? Promise.resolve(null)
+      : fetch(`gsi/${name}.webp`).then(r => { if (!r.ok) throw new Error(name); return r.blob(); }).then(b => createImageBitmap(b)).catch(() => null);
+    GA.set(name, p);
+    while (GA.size > 8) GA.delete(GA.keys().next().value);
+    return p;
+  }
+  async function gsiPixels(coords, Sz) {
+    const zg = Math.min(coords.z, GZ), k = coords.z - zg, xg = coords.x >> k, yg = coords.y >> k;
+    const atlas = await gsiAtlas(`${zg}_${xg >> 3}_${yg >> 3}`); if (!atlas) return null;
+    const sw = 256 / (1 << k);
+    const sx = (xg & 7) * 256 + (coords.x - (xg << k)) * sw, sy = (yg & 7) * 256 + (coords.y - (yg << k)) * sw;
+    const cv = document.createElement('canvas'); cv.width = cv.height = Sz;
+    const cx = cv.getContext('2d', { willReadFrequently: true });
+    cx.imageSmoothingEnabled = true; cx.imageSmoothingQuality = 'high';
+    cx.drawImage(atlas, sx, sy, sw, sw, 0, 0, Sz, Sz);
+    return cx.getImageData(0, 0, Sz, Sz).data;
+  }
+  const SeaLayer = L.GridLayer.extend({
+    createTile(coords, done) {
+      const tile = document.createElement('canvas');
+      tile.width = tile.height = 256 * DPR;
+      const Sz = 256 * DPR;
+      const need = coords.z >= FINE_FROM ? chunksForTile(coords).map(ensureChunk) : [];
+      Promise.all([gsiPixels(coords, Sz), ...need]).then(([G]) => setTimeout(() => {
+        try { drawTile(tile, coords, coords.z >= FINE_FROM ? FINE : COARSE, G); done(null, tile); } catch (e) { console.error(e); done(e, tile); }
+      }, 0), e => { console.error(e); done(e, tile); });
+      return tile;
+    }
+  });
+
+  // ---- 地図 ----
+  const map = L.map('map', {
+    minZoom: 5, maxZoom: 13, zoomSnap: 1, preferCanvas: true,
+    maxBounds: [[S - 3, W - 4], [N + 3, E + 4]], maxBoundsViscosity: 0.8, attributionControl: false
+  });
+  const sea = new SeaLayer({ tileSize: 256, updateWhenZooming: false, keepBuffer: 1 }).addTo(map);
+  L.control.scale({ imperial: false, position: 'bottomleft' }).addTo(map);
+  L.control.attribution({ prefix: false, position: 'bottomright' })
+    .addAttribution('水深：NOAA ETOPO 2022 ／ <a href="https://maps.gsi.go.jp/development/ichiran.html" target="_blank" rel="noopener">地理院タイル</a>・国土数値情報（行政区域）を加工')
+    .addTo(map);
+
+  // 地名ラベル
+  const labelLayer = L.layerGroup().addTo(map);
+  function updateLabels() {
+    labelLayer.clearLayers();
+    const z = map.getZoom(), b = map.getBounds().pad(0.05);
+    const placed = [];
+    for (const [name, lat, lon, kind] of LABELS) {
+      if (kind !== 0 || z > 8 || (GIDX.size && z > 7)) continue;
+      if (name === '所属未定地' || !b.contains([lat, lon])) continue;
+      const pt = map.latLngToContainerPoint([lat, lon]), hw = name.length * (kind === 0 ? 7.5 : 6) + 4, hh = 9;
+      if (placed.some(q => Math.abs(q.x - pt.x) < q.hw + hw && Math.abs(q.y - pt.y) < hh * 2)) continue;
+      placed.push({ x: pt.x, y: pt.y, hw });
+      if (placed.length > 400) break;
+      labelLayer.addLayer(L.marker([lat, lon], { interactive: false, keyboard: false,
+        icon: L.divIcon({ className: kind === 0 ? 'lbl pref' : 'lbl', html: `<span>${name}</span>`, iconSize: null }) }));
+    }
+  }
+  map.on('moveend', updateLabels);
+
+  // ---- 地点の読み取り ----
+  async function probe(latlng, load) {
+    const { lat, lng } = latlng;
+    if (lat > N || lat < S || lng < W || lng > E) return null;
+    let Lv = COARSE;
+    const fx = FINE.toX(lng), fy = FINE.toY(lat);
+    const k = ((Math.round(fy) / CN) | 0) * CI + ((Math.round(fx) / CN) | 0);
+    if (HAS[k] && !CH[k] && load) await ensureChunk(k);
+    if (CH[k]) Lv = FINE;
+    const r = sample(Lv, Lv.toX(lng), Lv.toY(lat));
+    if (r.m < 0.5) return { land: true, lat, lng };
+    const res = { land: false, lat, lng, d: r.d, s: r.s, mun: 0 };
+    // 最寄りの陸の自治体：一番近い海のセルの値
+    const gx = Lv.toX(lng), gy = Lv.toY(lat); let best = 9;
+    for (let c = 0; c < 4; c++) {
+      const x = Math.floor(gx) + (c & 1), y = Math.floor(gy) + (c >> 1);
+      Lv.get(x, y); const dd = (x - gx) ** 2 + (y - gy) ** 2;
+      if (gO === 1 && dd < best) { best = dd; res.mun = gM; }
+    }
+    return res;
+  }
+  const fmt = (v, d) => v.toLocaleString('ja-JP', { minimumFractionDigits: d, maximumFractionDigits: d });
+  function depthText(d) { return d < 1 ? '1m未満' : fmt(Math.round(d), 0) + ' m'; }
+  function distText(s) { return { km: fmt(s, 1), nm: fmt(s / 1.852, 1) }; }
+  function nearText(m) { return m ? MUNI[m] : '国外の陸地'; }
+  function whereText(lat, lng) { return `北緯 ${lat.toFixed(4)}°　東経 ${lng.toFixed(4)}°`; }
+
+  const pin = L.circleMarker([0, 0], { radius: 6, color: '#ffffff', weight: 2, fillColor: '#b0206a', fillOpacity: 1, interactive: false });
+  async function setPoint(latlng) {
+    const r = await probe(latlng, true);
+    const $ = id => document.getElementById(id);
+    if (!r) return;
+    pin.setLatLng(latlng).addTo(map);
+    $('r-where').textContent = whereText(r.lat, r.lng);
+    if (r.land) { $('r-depth').innerHTML = '<span class="sub">陸地</span>'; $('r-dist').textContent = '—'; $('r-near').textContent = '—'; return; }
+    const t = distText(r.s);
+    $('r-depth').innerHTML = `<b>${depthText(r.d)}</b>`;
+    $('r-dist').innerHTML = `<b>${t.km}</b> km <span class="sub">（${t.nm} 海里）</span>`;
+    $('r-near').textContent = nearText(r.mun);
+  }
+  map.on('click', e => setPoint(e.latlng));
+
+  const tip = document.createElement('div'); tip.id = 'tip'; tip.hidden = true;
+  document.getElementById('map').appendChild(tip);
+  let tipSeq = 0;
+  map.on('mousemove', async e => {
+    const seq = ++tipSeq, r = await probe(e.latlng, false);
+    if (seq !== tipSeq) return;
+    if (!r || r.land) { tip.hidden = true; return; }
+    const t = distText(r.s);
+    tip.innerHTML = `水深 <b>${depthText(r.d)}</b>　陸から <b>${t.km} km</b>（${t.nm} 海里）<br><span style="color:var(--muted)">最寄り：${nearText(r.mun)}</span>`;
+    tip.hidden = false;
+    const p = e.containerPoint, w = map.getSize();
+    tip.style.left = Math.min(p.x + 14, w.x - tip.offsetWidth - 8) + 'px';
+    tip.style.top = (p.y + 16 + tip.offsetHeight > w.y ? p.y - tip.offsetHeight - 10 : p.y + 16) + 'px';
+  });
+  map.on('mouseout', () => { tipSeq++; tip.hidden = true; });
+
+  // ---- 凡例 ----
+  function drawLegend() {
+    const cv = document.getElementById('legend'), cx = cv.getContext('2d'), w = cv.width, h = cv.height;
+    const isD = st.mode === 'depth', stops = isD ? DEPTH_STOPS : DIST_STOPS, f = isD ? fD : fT;
+    const lut = isD ? DLUT : TLUT, step = isD ? 1 : 0.1, max = isD ? 10000 : 400;
+    const fmax = f(max);
+    for (let x = 0; x < w; x++) {
+      const t = x / (w - 1) * fmax; let v = 0, lo = 0, hi = max;
+      for (let it = 0; it < 40; it++) { v = (lo + hi) / 2; if (f(v) < t) lo = v; else hi = v; }
+      const i = Math.min(Math.round(v / step), lut.length / 3 - 1) * 3;
+      cx.fillStyle = `rgb(${lut[i]},${lut[i + 1]},${lut[i + 2]})`; cx.fillRect(x, 0, 1, h);
+    }
+    const ticks = isD ? [0, 10, 50, 200, 1000, 10000] : [0, 1, 5, 20, 100, 400];
+    const unit = isD ? 'm' : 'km';
+    document.getElementById('ticks').innerHTML = ticks.map((v, i) =>
+      `<span style="left:${(f(v) / fmax * 100).toFixed(1)}%">${v.toLocaleString('ja-JP')}${i === ticks.length - 1 ? unit + (isD ? '' : '+') : ''}</span>`).join('');
+  }
+
+  // ---- 操作 ----
+  const $ = id => document.getElementById(id);
+  function redraw() { sea.redraw(); }
+  function setPressed(a, b, on) { $(a).setAttribute('aria-pressed', on); $(b).setAttribute('aria-pressed', !on); }
+  $('mode-depth').onclick = () => { st.mode = 'depth'; setPressed('mode-depth', 'mode-dist', true); drawLegend(); redraw(); };
+  $('mode-dist').onclick = () => { st.mode = 'dist'; setPressed('mode-depth', 'mode-dist', false); drawLegend(); redraw(); };
+  function renderChips() {
+    const u = st.unit, levels = u === 'nm' ? NM_LEVELS : KM_LEVELS;
+    $('dist-chips').innerHTML = levels.map(v => `<button class="chip" data-v="${v}" aria-pressed="${st.on[u].has(v)}">${v}${u === 'nm' ? '海里' : 'km'}${u === 'nm' && v === 12 ? '（領海の目安）' : ''}${u === 'nm' && v === 24 ? '（接続水域の目安）' : ''}</button>`).join('');
+  }
+  $('dist-chips').addEventListener('click', e => {
+    const b = e.target.closest('.chip'); if (!b) return;
+    const v = Number(b.dataset.v), s = st.on[st.unit];
+    s.has(v) ? s.delete(v) : s.add(v); b.setAttribute('aria-pressed', s.has(v)); redraw();
+  });
+  function setUnit(u) {
+    if (u === st.unit) return;
+    const k = u === 'nm' ? 1 / 1.852 : 1.852;
+    st.t0 = +(st.t0 * k).toFixed(1); st.t1 = +(st.t1 * k).toFixed(1);
+    $('t0').value = st.t0; $('t1').value = st.t1;
+    st.unit = u; setPressed('u-km', 'u-nm', u === 'km'); $('t-unit').textContent = u === 'nm' ? '海里' : 'km';
+    renderChips(); redraw();
+  }
+  $('u-km').onclick = () => setUnit('km'); $('u-nm').onclick = () => setUnit('nm');
+  $('show-dist').onchange = e => { st.showDist = e.target.checked; redraw(); };
+  $('show-iso').onchange = e => { st.showIso = e.target.checked; redraw(); };
+  $('flt-on').onchange = e => { st.filter = e.target.checked; redraw(); };
+  let tmr;
+  for (const id of ['d0', 'd1', 't0', 't1']) $(id).addEventListener('input', e => {
+    const v = parseFloat(e.target.value); if (!isFinite(v)) return;
+    st[id] = v; clearTimeout(tmr); tmr = setTimeout(() => { if (!st.filter) { st.filter = true; $('flt-on').checked = true; } redraw(); }, 350);
+  });
+
+  const PLACES = [
+    ['japan', '全国', null, null], ['ise', '伊勢湾・三河湾', [34.74, 136.8], 10], ['tokyo', '東京湾', [35.38, 139.8], 10],
+    ['osaka', '大阪湾', [34.5, 135.22], 10], ['suruga', '駿河湾', [34.85, 138.6], 10], ['setouchi', '瀬戸内海', [34.2, 133.1], 8],
+    ['ariake', '有明海', [32.95, 130.3], 10], ['mutsu', '陸奥湾', [41.0, 140.95], 10], ['okinawa', '沖縄本島', [26.5, 127.9], 9]
+  ];
+  function go(key) {
+    const p = PLACES.find(q => q[0] === key) || PLACES[1];
+    if (p[2]) { map.setView(p[2], p[3]); setPoint(L.latLng(p[2][0], p[2][1])); }
+    else map.fitBounds([[30, 128], [45.5, 146]]);
+  }
+  $('places').innerHTML = PLACES.map(p => `<button data-k="${p[0]}">${p[1]}</button>`).join('');
+  $('places').addEventListener('click', e => { const b = e.target.closest('button'); if (b) go(b.dataset.k); });
+
+  // テーマ切替に追従
+  const reTheme = () => { readColors(); redraw(); };
+  window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', reTheme);
+  new MutationObserver(reTheme).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+
+  $('sheet').onclick = () => {
+    const open = $('app').classList.toggle('open');
+    $('sheet').setAttribute('aria-expanded', open); $('sheet').textContent = open ? '地図を広く' : '設定を広げる';
+    setTimeout(() => map.invalidateSize(), 250);
+  };
+  renderChips(); drawLegend();
+  window.APP = { map, meta, probe, setPoint, depthText, distText, nearText, GIDX };
+  document.dispatchEvent(new Event('app-ready'));
+  const h = (location.hash || '').slice(1);
+  go(PLACES.some(p => p[0] === h) ? h : 'ise');
+  updateLabels();
+  if (h === 'japan') setPoint(L.latLng(34.74, 136.8));
+})().catch(e => {
+  console.error(e);
+  const el = document.getElementById('loading');
+  if (el) { el.hidden = false; el.textContent = 'データを読み込めませんでした。ページを再読み込みしてください。'; }
+});
+</script>
+
+<script src="pwa.js"></script>
+</body>
+</html>
