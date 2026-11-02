@@ -365,6 +365,27 @@ details[open] summary { margin-bottom: 8px; }
   const y2lat = yn => 180 / Math.PI * Math.atan(Math.sinh(Math.PI * (1 - 2 * yn)));
   function band(levels, v) { let b = 0; while (b < levels.length && v >= levels[b]) b++; return b; }
 
+  // 航空写真モードの陸の判定（1=写真を見せる）。淡色地図の陸は白地を含むので、白を含まない塊（海上の注記・航路）と細かい点は2にして地図のまま描く
+  const isSea = (G, o) => Math.abs(G[o] - 190) + Math.abs(G[o + 1] - 210) + Math.abs(G[o + 2] - 255) < 36;
+  function photoLand(G, Sz) {
+    const n = Sz * Sz, L = new Uint8Array(n), seen = new Uint8Array(n), comp = new Int32Array(n);
+    for (let p = 0; p < n; p++) if (G[p * 4 + 3] > 127 && !isSea(G, p * 4)) L[p] = 1;
+    for (let s = 0; s < n; s++) {
+      if (!L[s] || seen[s]) continue;
+      let k = 0, head = 0, white = 0;
+      comp[k++] = s; seen[s] = 1;
+      while (head < k) {
+        const p = comp[head++], x = p % Sz, o = p * 4;
+        if (G[o] > 250 && G[o + 1] > 250 && G[o + 2] > 250) white++;
+        for (const q of [x > 0 ? p - 1 : -1, x < Sz - 1 ? p + 1 : -1, p - Sz, p + Sz]) {
+          if (q >= 0 && q < n && L[q] && !seen[q]) { seen[q] = 1; comp[k++] = q; }
+        }
+      }
+      if (k < 60 * DPR * DPR || (white < k * 0.03 && k < n * 0.15)) for (let i = 0; i < k; i++) L[comp[i]] = 2;
+    }
+    return L;
+  }
+
   function drawTile(tile, coords, Lv, G) {
     const Sz = 256 * DPR, n = Sz * Sz, scale = 256 * Math.pow(2, coords.z);
     const ctx = tile.getContext('2d'), img = ctx.createImageData(Sz, Sz), px = img.data;
@@ -388,6 +409,7 @@ details[open] summary { margin-bottom: 8px; }
     const pxKm = 40075 * Math.cos(LATS[Sz >> 1] * Math.PI / 180) / scale;
     const dl = (unit === 'nm' ? NM_LEVELS : KM_LEVELS).filter(v => st.on[unit].has(v) && v * k >= pxKm * 5).map(v => v * k);
     const dlMajor = dl.map(v => st.major[unit].has(Math.round(v / k)));
+    const PL = BASE.photo && G ? photoLand(G, Sz) : null;
     const BT = new Int16Array(n), BD = new Int16Array(n), MT = new Uint8Array(n);
     const lo = st.d0, hi = st.d1, t0 = st.t0 * k, t1 = st.t1 * k;
     for (let p = 0; p < n; p++) {
@@ -431,7 +453,9 @@ details[open] summary { margin-bottom: 8px; }
       const m = M[p];
       // 地理院タイルがあれば陸はそのまま使い、海の色の画素だけ水深データで塗る
       const gOK = G && G[o + 3] > 127;
-      if (gOK) {
+      // 航空写真モード：陸は透明にして下の写真を見せる
+      if (BASE.photo && (gOK ? PL[p] === 1 : m < 0.5)) { px[o + 3] = 0; continue; }
+      if (gOK && (!BASE.photo || PL[p] === 2)) {
         const gr = G[o], gg = G[o + 1], gb = G[o + 2];
         const gsea = Math.abs(gr - 190) + Math.abs(gg - 210) + Math.abs(gb - 255) < 36;
         if (!gsea || m < 0.02) {
@@ -439,7 +463,7 @@ details[open] summary { margin-bottom: 8px; }
           else { px[o] = gr; px[o + 1] = gg; px[o + 2] = gb; }
           px[o + 3] = 255; continue;
         }
-      } else if (m < 0.5) {
+      } else if (!BASE.photo && m < 0.5) {
         r = land[0]; g = land[1]; b = land[2];
         const cw = Math.max(0, 1 - Math.abs(m - 0.5) / 0.09);
         r += (coast[0] - r) * cw * 0.85; g += (coast[1] - g) * cw * 0.85; b += (coast[2] - b) * cw * 0.85;
@@ -452,8 +476,9 @@ details[open] summary { margin-bottom: 8px; }
       if (lineD[p]) { const a = iso[3] * lineD[p] * 1.6; r += (iso[0] - r) * a; g += (iso[1] - g) * a; b += (iso[2] - b) * a; }
       if (lineT[p]) { const col = lineOnDist ? [30, 24, 40] : dc, a = lineT[p] * (lineOnDist ? 0.55 : 0.9); r += (col[0] - r) * a; g += (col[1] - g) * a; b += (col[2] - b) * a; }
       if (lineM[p]) { r = mt[0]; g = mt[1]; b = mt[2]; }
-      if (!gOK) { const cw = Math.max(0, 1 - Math.abs(m - 0.5) / 0.09); r += (coast[0] - r) * cw * 0.85; g += (coast[1] - g) * cw * 0.85; b += (coast[2] - b) * cw * 0.85; }
-      px[o] = r; px[o + 1] = g; px[o + 2] = b; px[o + 3] = 255;
+      if (!gOK && !BASE.photo) { const cw = Math.max(0, 1 - Math.abs(m - 0.5) / 0.09); r += (coast[0] - r) * cw * 0.85; g += (coast[1] - g) * cw * 0.85; b += (coast[2] - b) * cw * 0.85; }
+      // 写真モードで水深データが陸扱いの入り江などは、色を薄めて写真の水面を透かす
+      px[o] = r; px[o + 1] = g; px[o + 2] = b; px[o + 3] = BASE.photo && gOK ? Math.min(255, 115 + m * 280) : 255;
     }
     ctx.putImageData(img, 0, 0);
   }
@@ -485,7 +510,23 @@ details[open] summary { margin-bottom: 8px; }
     while (GA.size > 8) GA.delete(GA.keys().next().value);
     return p;
   }
+  // Webアプリ版の航空写真モード用。z12以上は淡色地図をネットから読み、海岸線を細かくする
+  const BASE = { photo: false, paleURL: null };
+  function gsiNet(coords) {
+    const z = Math.min(coords.z, 18), k = coords.z - z;
+    return fetch(BASE.paleURL(z, coords.x >> k, coords.y >> k), { mode: 'cors' })
+      .then(r => r.ok ? r.blob() : null).then(b => b && createImageBitmap(b)).catch(() => null);
+  }
   async function gsiPixels(coords, Sz) {
+    if (BASE.photo && BASE.paleURL && coords.z > GZ) {
+      const bm = await gsiNet(coords);
+      if (bm) {
+        const cv = document.createElement('canvas'); cv.width = cv.height = Sz;
+        const cx = cv.getContext('2d', { willReadFrequently: true });
+        cx.drawImage(bm, 0, 0, Sz, Sz);
+        return cx.getImageData(0, 0, Sz, Sz).data;
+      }
+    }
     const zg = Math.min(coords.z, GZ), k = coords.z - zg, xg = coords.x >> k, yg = coords.y >> k;
     const atlas = await gsiAtlas(`${zg}_${xg >> 3}_${yg >> 3}`); if (!atlas) return null;
     const sw = 256 / (1 << k);
@@ -670,7 +711,7 @@ details[open] summary { margin-bottom: 8px; }
     setTimeout(() => map.invalidateSize(), 250);
   };
   renderChips(); drawLegend();
-  window.APP = { map, meta, probe, setPoint, depthText, distText, nearText, GIDX };
+  window.APP = { map, meta, probe, setPoint, depthText, distText, nearText, GIDX, BASE, sea };
   document.dispatchEvent(new Event('app-ready'));
   const h = (location.hash || '').slice(1);
   go(PLACES.some(p => p[0] === h) ? h : 'ise');

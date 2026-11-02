@@ -9,9 +9,27 @@ self.addEventListener('activate', e => {
   e.waitUntil(caches.keys().then(ks => Promise.all(ks.filter(k => !k.endsWith('-' + VER)).map(k => caches.delete(k))))
     .then(() => self.clients.claim()));
 });
+let puts = 0;
+const PHOTO_MAX = 12000;
+async function trim(c) {
+  const ks = await c.keys();
+  for (let i = 0; i < ks.length - PHOTO_MAX; i++) await c.delete(ks[i]);
+}
 self.addEventListener('fetch', e => {
   const req = e.request, url = new URL(req.url);
-  if (req.method !== 'GET' || url.origin !== location.origin) return;
+  if (req.method !== 'GET') return;
+  // 地理院の航空写真・淡色地図も保存分優先（古いものから消して上限を保つ）
+  if (url.hostname === 'cyberjapandata.gsi.go.jp' && /^\/xyz\/(seamlessphoto|pale)\//.test(url.pathname)) {
+    e.respondWith(caches.open('photo-' + VER).then(async c => {
+      const hit = await c.match(req);
+      if (hit) return hit;
+      const res = await fetch(req);
+      if (res.ok && res.type !== 'opaque') { await c.put(req, res.clone()); if (++puts % 200 === 0) trim(c); }
+      return res;
+    }));
+    return;
+  }
+  if (url.origin !== location.origin) return;
   const isData = /\/(data\/c\d\d_\d\d\.png|gsi\/[\d_]+\.webp)$/.test(url.pathname);
   if (isData) {
     e.respondWith(caches.open('data-' + VER).then(async c => {

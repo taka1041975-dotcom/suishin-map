@@ -53,10 +53,43 @@
     });
     map.on('dragstart', () => { if (follow) { follow = false; paint(); } });
 
+    // ---- 地図／航空写真の切替（陸だけ写真にし、海は水深の色のまま） ----
+    const GSI = 'https://cyberjapandata.gsi.go.jp/xyz/';
+    const PHOTO = (z, x, y) => `${GSI}seamlessphoto/${z}/${x}/${y}.jpg`, PALE = (z, x, y) => `${GSI}pale/${z}/${x}/${y}.png`;
+    A.BASE.paleURL = PALE;
+    const photo = L.tileLayer(GSI + 'seamlessphoto/{z}/{x}/{y}.jpg', { maxNativeZoom: 18, maxZoom: 17, crossOrigin: 'anonymous', zIndex: 0 });
+    A.sea.setZIndex(2);
+    // 写真モードでは陸が透明なので、前のズームの海タイルが残ると穴から透けて見える。読み込み後に片付ける
+    A.sea.on('load', () => { if (A.BASE.photo) setTimeout(() => A.sea._pruneTiles(), 300); });
+    const bctl = L.control({ position: 'topright' });
+    bctl.onAdd = () => {
+      const d = L.DomUtil.create('div', 'leaflet-bar basesw');
+      d.innerHTML = '<a href="#" id="base-map" role="button">地図</a><a href="#" id="base-photo" role="button">写真</a>';
+      L.DomEvent.disableClickPropagation(d);
+      return d;
+    };
+    bctl.addTo(map);
+    const css = document.createElement('style');
+    css.textContent = `.basesw { display: flex; } .basesw a { width: auto !important; padding: 0 10px; font-size: 13px; font-weight: 700; }
+      .basesw a + a { border-left: 1px solid #ccc; } .basesw a[aria-pressed="true"] { background: #1d2a36; color: #fff; }`;
+    document.head.appendChild(css);
+    function setBase(on) {
+      A.BASE.photo = on;
+      $('base-map').setAttribute('aria-pressed', !on); $('base-photo').setAttribute('aria-pressed', on);
+      if (on) photo.addTo(map); else photo.remove();
+      map.setMaxZoom(on ? 17 : 13);
+      A.sea.redraw();
+      try { localStorage.setItem('base', on ? 'photo' : 'map'); } catch (e) {}
+    }
+    $('base-map').onclick = e => { e.preventDefault(); if (A.BASE.photo) setBase(false); };
+    $('base-photo').onclick = e => { e.preventDefault(); if (!A.BASE.photo) setBase(true); };
+    let saved = null; try { saved = localStorage.getItem('base'); } catch (e) {}
+    setBase(saved === 'photo');
+
     // ---- 圏外用の保存 ----
     const sec = document.createElement('section');
     sec.innerHTML = `<h2>圏外で使う</h2>
-      <p class="small">一度表示した場所は端末に保存され、圏外でも見られます。出かける前にまとめて保存しておくと確実です。</p>
+      <p class="small">一度表示した場所は端末に保存され、圏外でも見られます。出かける前にまとめて保存しておくと確実です。写真を表示中に「表示中の範囲を保存」を押すと、その範囲の航空写真も3段階拡大分まで保存します（全国保存には写真は入りません）。</p>
       <div class="places" style="margin-top:8px"><button id="save-view">表示中の範囲を保存</button><button id="save-all">全国を保存（約130MB）</button></div>
       <p class="small" id="save-status" style="margin-top:6px"></p>`;
     const go = $('h-go').closest('section');
@@ -83,6 +116,18 @@
             if (A.GIDX.has(name)) out.add(`gsi/${name}.webp`);
           }
       }
+      if (A.BASE.photo) {
+        // 航空写真と、海岸線用の淡色地図（z12以上）を今のズームから3段階分
+        const z0 = Math.max(8, map.getZoom()), z1 = Math.min(z0 + 3, 17);
+        const tw = b.getWest(), te = b.getEast(), tn = b.getNorth(), ts = b.getSouth();
+        let n = 0;
+        for (let z = z0; z <= z1 && n < 4000; z++)
+          for (let x = lon2t(tw, z); x <= lon2t(te, z); x++)
+            for (let y = lat2t(tn, z); y <= lat2t(ts, z); y++) {
+              out.add(PHOTO(z, x, y)); n++;
+              if (z > 11) out.add(PALE(z, x, y));
+            }
+      }
       return [...out];
     }
     let busy = false;
@@ -94,7 +139,7 @@
       const worker = async () => {
         while (queue.length) {
           const f = queue.shift();
-          try { const r = await fetch(f); if (!r.ok) throw 0; bytes += (await r.arrayBuffer()).byteLength; } catch (e) { failed++; }
+          try { const r = await fetch(f, f.startsWith('http') ? { mode: 'cors' } : undefined); if (!r.ok && r.status !== 404) throw 0; bytes += (await r.arrayBuffer()).byteLength; } catch (e) { failed++; }
           done++;
           setStatus(`${label}を保存中… ${done} / ${files.length}（${(bytes / 1e6).toFixed(0)}MB）`);
         }
