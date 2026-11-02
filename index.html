@@ -106,7 +106,7 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); ou
 .ticks { position: relative; height: 16px; font-size: 10px; color: var(--muted); font-variant-numeric: tabular-nums; }
 .ticks span { position: absolute; transform: translateX(-50%); white-space: nowrap; }
 .ticks span:first-child { transform: none; }
-.ticks span:last-child { transform: translateX(-100%); }
+.ticks span:last-child { transform: translateX(-35%); }
 .key { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12px; color: var(--muted); margin-top: 4px; }
 .key i { display: inline-block; width: 18px; height: 0; border-top: 2px solid var(--dist-line); vertical-align: middle; margin-right: 5px; }
 .key i.iso { border-top: 1px solid var(--iso-line); border-top-width: 2px; }
@@ -201,7 +201,7 @@ details[open] summary { margin-bottom: 8px; }
     </section>
 
     <section aria-labelledby="h-color">
-      <h2 id="h-color">色分け（水深）</h2>
+      <h2 id="h-color">色分け（水深 m）</h2>
       <div class="legend">
         <canvas id="legend" width="600" height="28"></canvas>
         <div class="ticks" id="ticks"></div>
@@ -214,7 +214,7 @@ details[open] summary { margin-bottom: 8px; }
       </div>
       <label class="check"><input type="checkbox" id="show-dist" checked> 陸からの距離の線</label>
       <div class="chips" id="dist-chips"></div>
-      <label class="check" style="margin-top:8px"><input type="checkbox" id="show-iso" checked> 等深線（10・20・50・100・200・500・1000m…）</label>
+      <label class="check" style="margin-top:8px"><input type="checkbox" id="show-iso" checked> 等深線（10・20・30・50・100・200・500・1000m…）</label>
       <div class="key"><span><i></i>距離の線</span><span><i class="iso"></i>等深線</span></div>
     </section>
 
@@ -339,19 +339,26 @@ details[open] summary { margin-bottom: 8px; }
   const fD = v => Math.log(1 + v / 4), fT = v => Math.log(1 + v / 0.8);
   const DEPTH_STOPS = [[0, '#e6f7f2'], [5, '#cdeeea'], [10, '#b0e2e4'], [20, '#8dcfdc'], [50, '#62b3d2'], [100, '#4697c5'], [200, '#337ab5'], [500, '#295fa1'], [1000, '#244a8c'], [2000, '#1f3875'], [4000, '#1a295c'], [6000, '#141e45'], [10000, '#0b1230']];
   const DIST_STOPS = [[0, '#fff3cf'], [1, '#ffe2a1'], [3, '#ffc777'], [5, '#fbab5e'], [10, '#ef8955'], [20, '#d96858'], [50, '#b24f6c'], [100, '#82407c'], [200, '#55327a'], [400, '#30265e'], [900, '#1b173b']];
-  const DLUT = buildLUT(DEPTH_STOPS, 10000, 1, fD);
+  // 水深は段階ごとにはっきり違う色で塗る（浅い＝黄、深くなるほど緑→水色→青→紺）
+  const DEPTH_BANDS = [[5, '#fbe7a1'], [10, '#dcec9b'], [20, '#a8dca0'], [30, '#70cab1'], [50, '#44b4c5'], [100, '#3795cf'],
+    [200, '#3a6ec0'], [500, '#3a4fa5'], [1000, '#323a86'], [3000, '#262d66'], [Infinity, '#181d45']];
+  const DLUT = new Uint8Array(10001 * 3);
+  for (let i = 0, k = 0; i <= 10000; i++) {
+    while (i >= DEPTH_BANDS[k][0]) k++;
+    DLUT.set(hex(DEPTH_BANDS[k][1]).slice(0, 3), i * 3);
+  }
   const TLUT = buildLUT(DIST_STOPS, 900, 0.1, fT);
 
   // ---- 状態 ----
-  const KM_LEVELS = [1, 2, 3, 5, 10, 20, 30, 50];
-  const NM_LEVELS = [1, 3, 6, 12, 24, 50];
+  const KM_LEVELS = [1, 2, 3, 5];
+  const NM_LEVELS = [1, 2, 3, 5];
   const st = {
     mode: 'depth', unit: 'km', showDist: true, showIso: true, filter: false,
-    on: { km: new Set([1, 2, 3, 5, 10, 20, 50]), nm: new Set([3, 12, 24]) },
-    major: { km: new Set([10, 50]), nm: new Set([12, 24]) },
+    on: { km: new Set([1, 2, 3, 5]), nm: new Set([1, 3, 5]) },
+    major: { km: new Set([5]), nm: new Set([5]) },
     d0: 10, d1: 50, t0: 0, t1: 10
   };
-  const ISO = [10, 20, 50, 100, 200, 500, 1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000, 9000];
+  const ISO = [10, 20, 30, 50, 100, 200, 500, 1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000, 9000];
   const ISO_MAJOR = new Set([50, 200, 1000]);
 
   let C = {};
@@ -640,21 +647,13 @@ details[open] summary { margin-bottom: 8px; }
 
   // ---- 凡例 ----
   function drawLegend() {
-    const cv = document.getElementById('legend'), cx = cv.getContext('2d'), w = cv.width, h = cv.height;
-    const isD = st.mode === 'depth', stops = isD ? DEPTH_STOPS : DIST_STOPS, f = isD ? fD : fT;
-    const lut = isD ? DLUT : TLUT, step = isD ? 1 : 0.1, max = isD ? 10000 : 400;
-    const fmax = f(max);
-    for (let x = 0; x < w; x++) {
-      const t = x / (w - 1) * fmax; let v = 0, lo = 0, hi = max;
-      for (let it = 0; it < 40; it++) { v = (lo + hi) / 2; if (f(v) < t) lo = v; else hi = v; }
-      const i = Math.min(Math.round(v / step), lut.length / 3 - 1) * 3;
-      cx.fillStyle = `rgb(${lut[i]},${lut[i + 1]},${lut[i + 2]})`; cx.fillRect(x, 0, 1, h);
-    }
-    const ticks = isD ? [0, 10, 50, 200, 1000, 10000] : [0, 1, 5, 20, 100, 400];
-    const unit = isD ? 'm' : 'km';
-    document.getElementById('ticks').innerHTML = ticks.map((v, i) =>
-      `<span style="left:${(f(v) / fmax * 100).toFixed(1)}%">${v.toLocaleString('ja-JP')}${i === ticks.length - 1 ? unit + (isD ? '' : '+') : ''}</span>`).join('');
+    const cv = document.getElementById('legend'), cx = cv.getContext('2d'), w = cv.width, h = cv.height, nb = DEPTH_BANDS.length;
+    DEPTH_BANDS.forEach(([, c], k) => { cx.fillStyle = c; cx.fillRect(Math.round(k * w / nb), 0, Math.ceil(w / nb), h); });
+    const lab = [0, ...DEPTH_BANDS.slice(0, -1).map(b => b[0])];
+    document.getElementById('ticks').innerHTML = lab.map((v, k) =>
+      `<span style="left:${(k / nb * 100).toFixed(2)}%">${v}${k === lab.length - 1 ? '〜' : ''}</span>`).join('');
   }
+
 
   // ---- 操作 ----
   const $ = id => document.getElementById(id);
@@ -662,7 +661,7 @@ details[open] summary { margin-bottom: 8px; }
   function setPressed(a, b, on) { $(a).setAttribute('aria-pressed', on); $(b).setAttribute('aria-pressed', !on); }
   function renderChips() {
     const u = st.unit, levels = u === 'nm' ? NM_LEVELS : KM_LEVELS;
-    $('dist-chips').innerHTML = levels.map(v => `<button class="chip" data-v="${v}" aria-pressed="${st.on[u].has(v)}">${v}${u === 'nm' ? '海里' : 'km'}${u === 'nm' && v === 12 ? '（領海の目安）' : ''}${u === 'nm' && v === 24 ? '（接続水域の目安）' : ''}</button>`).join('');
+    $('dist-chips').innerHTML = levels.map(v => `<button class="chip" data-v="${v}" aria-pressed="${st.on[u].has(v)}">${v}${u === 'nm' ? '海里' : 'km'}</button>`).join('');
   }
   $('dist-chips').addEventListener('click', e => {
     const b = e.target.closest('.chip'); if (!b) return;
